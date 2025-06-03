@@ -14,28 +14,33 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
 	"github.com/PuerkitoBio/goquery"
+	"github.com/joho/godotenv"
 )
 
 // Конфигурация
 const (
-	ZeroHedgeURL    = "https://www.zerohedge.com/"
-	LastPostFile    = "last_post.txt"
-	TelegramBotAPI  = "https://api.telegram.org/bot%s/sendMessage"
-	YandexTranslate = "https://translate.api.cloud.yandex.net/translate/v2/translate"
-	MaxRetries      = 3
-	RetryDelay      = 5 * time.Second
-	LogFile         = "zerohedge_monitor.log"
+	ZeroHedgeURL       = "https://www.zerohedge.com/"
+	LastPostFile       = "last_post.txt"
+	TelegramBotAPI     = "https://api.telegram.org/bot%s/sendMessage"
+	YandexTranslate    = "https://translate.api.cloud.yandex.net/translate/v2/translate"
+	MaxRetries         = 3
+	RetryDelay         = 5 * time.Second
+	LogFile            = "zerohedge_monitor.log"
+	CheckInterval      = 30 * time.Minute // Интервал проверки
+	MaxSummaryLength   = 4000             // Максимальная длина для Telegram
+	SummarySentences   = 5                // Количество предложений для сокращения
 )
 
 var (
-	TelegramToken   = os.Getenv("TG_TOKEN")
-	TelegramChatID  = os.Getenv("TG_CHAT_ID")
-	YandexAPIKey    = os.Getenv("YANDEX_TRANSLATE_KEY")
-	YandexFolderID  = os.Getenv("YANDEX_FOLDER_ID")
+	TelegramToken   string
+	TelegramChatID  string
+	YandexAPIKey    string
+	YandexFolderID  string
 )
 
 // Структуры данных
@@ -61,7 +66,7 @@ func setupLogger() (*slog.Logger, error) {
 		slog.NewJSONHandler(io.MultiWriter(os.Stdout, logFile), &slog.HandlerOptions{
 			Level:     slog.LevelDebug,
 			AddSource: true,
-		}),
+		},
 	)
 
 	slog.SetDefault(logger)
@@ -137,62 +142,101 @@ func translateWithYandex(ctx context.Context, text string) (string, error) {
 	return result.Translations[0].Text, nil
 }
 
-func getLatestArticle(ctx context.Context) (string, error) {
+func getLatestArticle(ctx context.Context) (string, string, error) {
 	resp, err := httpClient.Get(ZeroHedgeURL)
 	if err != nil {
-		return "", fmt.Errorf("ошибка запроса: %w", err)
+		return "", "", fmt.Errorf("ошибка запроса: %w", err)
 	}
 	defer resp.Body.Close()
 
 	doc, err := goquery.NewDocumentFromReader(resp.Body)
 	if err != nil {
-		return "", fmt.Errorf("ошибка парсинга: %w", err)
+		return "", "", fmt.Errorf("ошибка парсинга: %w", err)
 	}
 
-	// Ищем статью (настройте селектор под актуальную верстку)
-	article := doc.Find("article").First()
+	// Улучшенный селектор для статьи
+	article := doc.Find(".content article, article.node--type-article").First()
 	if article == nil {
-		return "", errors.New("статья не найдена")
+		return "", "", errors.New("статья не найдена")
 	}
 
-	link, exists := article.Find("a").First().Attr("href")
+	link, exists := article.Find("a[href]:has(h2, h3, h4)").First().Attr("href")
 	if !exists {
-		return "", errors.New("ссылка не найдена")
+		return "", "", errors.New("ссылка не найдена")
 	}
+
+	title := article.Find("h2, h3, h4").First().Text()
 
 	if !strings.HasPrefix(link, "http") {
 		link = ZeroHedgeURL + strings.TrimPrefix(link, "/")
 	}
 
-	return link, nil
+	return link, strings.TrimSpace(title), nil
 }
 
-func getArticleContent(ctx context.Context, url string) (string, error) {
+func getArticleContent(ctx context.Context, url string) (string, []string, error) {
 	resp, err := httpClient.Get(url)
 	if err != nil {
-		return "", fmt.Errorf("ошибка запроса: %w", err)
+		return "", nil, fmt.Errorf("ошибка запроса: %w", err)
 	}
 	defer resp.Body.Close()
 
 	doc, err := goquery.NewDocumentFromReader(resp.Body)
 	if err != nil {
-		return "", fmt.Errorf("ошибка парсинга: %w", err)
+		return "", nil, fmt.Errorf("ошибка парсинга: %w", err)
 	}
 
-	// Извлекаем основной текст (настройте селектор)
-	content := doc.Find(".article-content").Text()
+	// Улучшенный селектор для контента
+	content := doc.Find(".article-content, .content .field--name-body, .body-content").Text()
 	if content == "" {
-		return "", errors.New("контент не найден")
+		return "", nil, errors.New("контент не найден")
 	}
 
-	return content, nil
+	// Извлекаем изображения
+	var images []string
+	doc.Find(".article-content img, .content img, .field--name-body img").Each(func(i int, s *goquery.Selection) {
+		if src, exists := s.Attr("src"); exists {
+			if !strings.HasPrefix(src, "http") {
+				src = ZeroHedgeURL + strings.TrimPrefix(src, "/")
+			}
+			images = append(images, src)
+		}
+	})
+
+	return strings.TrimSpace(content), images, nil
 }
 
-func sendToTelegram(ctx context.Context, text string) error {
+func sendToTelegram(ctx context.Context, text string, images []string) error {
 	apiURL := fmt.Sprintf(TelegramBotAPI, TelegramToken)
+	
+	// Сначала отправляем изображения (если есть)
+	for _, img := range images {
+		photoURL := fmt.Sprintf("https://api.telegram.org/bot%s/sendPhoto", TelegramToken)
+		payload := map[string]string{
+			"chat_id": TelegramChatID,
+			"photo":   img,
+			"caption": "",
+		}
+
+		jsonData, err := json.Marshal(payload)
+		if err != nil {
+			slog.Error("Ошибка сериализации изображения", "err", err)
+			continue
+		}
+
+		resp, err := httpClient.Post(photoURL, "application/json", bytes.NewReader(jsonData))
+		if err != nil {
+			slog.Error("Ошибка отправки изображения", "err", err, "url", img)
+			continue
+		}
+		resp.Body.Close()
+	}
+
+	// Затем отправляем текст
 	payload := map[string]string{
-		"chat_id": TelegramChatID,
-		"text":    text,
+		"chat_id":    TelegramChatID,
+		"text":       text,
+		"parse_mode": "HTML",
 	}
 
 	jsonData, err := json.Marshal(payload)
@@ -213,11 +257,11 @@ func sendToTelegram(ctx context.Context, text string) error {
 	return nil
 }
 
-func processArticle(ctx context.Context, articleURL string) error {
+func processArticle(ctx context.Context, articleURL, articleTitle string) error {
 	logger := slog.FromContext(ctx)
 
-	// Получаем текст статьи
-	content, err := getArticleContent(ctx, articleURL)
+	// Получаем текст статьи и изображения
+	content, images, err := getArticleContent(ctx, articleURL)
 	if err != nil {
 		return fmt.Errorf("ошибка получения контента: %w", err)
 	}
@@ -228,25 +272,54 @@ func processArticle(ctx context.Context, articleURL string) error {
 		return fmt.Errorf("ошибка перевода: %w", err)
 	}
 
-	// Формируем сообщение (первые 500 символов)
-	summary := shortenText(translation, 500)
-	message := fmt.Sprintf("📌 **Перевод статьи**\n\n%s\n\n🔗 Читать полностью: %s", summary, articleURL)
+	// Интеллектуальное сокращение текста
+	summary := intelligentSummary(translation, SummarySentences, MaxSummaryLength)
+	
+	// Формируем сообщение
+	message := fmt.Sprintf(
+		"<b>📌 %s</b>\n\n%s\n\n<a href=\"%s\">🔗 Читать полностью</a>",
+		articleTitle,
+		summary,
+		articleURL,
+	)
 
 	// Отправляем в Telegram
-	if err := sendToTelegram(ctx, message); err != nil {
+	if err := sendToTelegram(ctx, message, images); err != nil {
 		return fmt.Errorf("ошибка отправки: %w", err)
 	}
 
-	logger.Info("Статья успешно обработана")
+	logger.Info("Статья успешно обработана", "url", articleURL)
 	return nil
 }
 
 // Вспомогательные функции
+func intelligentSummary(text string, sentences int, maxLen int) string {
+	// Сначала сокращаем до максимальной длины
+	if len(text) > maxLen {
+		text = text[:maxLen]
+	}
+
+	// Затем пытаемся обрезать по последнему предложению
+	r := regexp.MustCompile(`(?s)(.*?[.!?](\s|$))`)
+	matches := r.FindAllString(text, -1)
+
+	if len(matches) > 0 {
+		if sentences > len(matches) {
+			sentences = len(matches)
+		}
+		summary := strings.Join(matches[:sentences], " ")
+		return strings.TrimSpace(summary) + "…"
+	}
+
+	// Если не нашли предложения, просто обрезаем
+	return shortenText(text, maxLen)
+}
+
 func shortenText(text string, maxLen int) string {
 	if len(text) <= maxLen {
 		return text
 	}
-	return text[:maxLen] + "..."
+	return text[:maxLen] + "…"
 }
 
 func readLastPost() (LastPost, error) {
@@ -285,38 +358,61 @@ func run(ctx context.Context) error {
 	logger := slog.FromContext(ctx)
 	logger.Info("Запуск мониторинга ZeroHedge")
 
-	// Получаем последнюю статью
-	articleURL, err := getLatestArticle(ctx)
-	if err != nil {
-		return fmt.Errorf("ошибка поиска статьи: %w", err)
-	}
+	ticker := time.NewTicker(CheckInterval)
+	defer ticker.Stop()
 
-	// Проверяем, была ли статья уже обработана
-	lastPost, err := readLastPost()
-	if err != nil {
-		return fmt.Errorf("ошибка чтения истории: %w", err)
-	}
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-ticker.C:
+			// Получаем последнюю статью
+			articleURL, articleTitle, err := getLatestArticle(ctx)
+			if err != nil {
+				logger.Error("Ошибка поиска статьи", "err", err)
+				continue
+			}
 
-	currentHash := md5.Sum([]byte(articleURL))
-	if hex.EncodeToString(currentHash[:]) == lastPost.Hash {
-		logger.Info("Новых статей нет")
-		return nil
-	}
+			// Проверяем, была ли статья уже обработана
+			lastPost, err := readLastPost()
+			if err != nil {
+				logger.Error("Ошибка чтения истории", "err", err)
+				continue
+			}
 
-	// Обрабатываем новую статью
-	if err := processArticle(ctx, articleURL); err != nil {
-		return err
-	}
+			currentHash := md5.Sum([]byte(articleURL))
+			if hex.EncodeToString(currentHash[:]) == lastPost.Hash {
+				logger.Info("Новых статей нет")
+				continue
+			}
 
-	// Сохраняем состояние
-	if err := saveLastPost(articleURL); err != nil {
-		return fmt.Errorf("ошибка сохранения: %w", err)
-	}
+			// Обрабатываем новую статью
+			if err := processArticle(ctx, articleURL, articleTitle); err != nil {
+				logger.Error("Ошибка обработки статьи", "err", err, "url", articleURL)
+				continue
+			}
 
-	return nil
+			// Сохраняем состояние
+			if err := saveLastPost(articleURL); err != nil {
+				logger.Error("Ошибка сохранения", "err", err)
+				continue
+			}
+		}
+	}
 }
 
 func main() {
+	// Загрузка .env файла
+	if err := godotenv.Load(); err != nil {
+		fmt.Println("Не удалось загрузить .env файл:", err)
+	}
+
+	// Инициализация переменных окружения
+	TelegramToken = os.Getenv("TG_TOKEN")
+	TelegramChatID = os.Getenv("TG_CHAT_ID")
+	YandexAPIKey = os.Getenv("YANDEX_TRANSLATE_KEY")
+	YandexFolderID = os.Getenv("YANDEX_FOLDER_ID")
+
 	// Инициализация логгера
 	logger, err := setupLogger()
 	if err != nil {
@@ -347,7 +443,7 @@ func main() {
 	if err := run(ctx); err != nil {
 		logger.Error("Критическая ошибка", "err", err)
 		errorMsg := fmt.Sprintf("🚨 Ошибка в ZeroHedge Monitor:\n\n%s", err)
-		if err := sendToTelegram(ctx, errorMsg); err != nil {
+		if err := sendToTelegram(ctx, errorMsg, nil); err != nil {
 			logger.Error("Не удалось отправить ошибку в Telegram", "err", err)
 		}
 		os.Exit(1)
