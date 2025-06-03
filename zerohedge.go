@@ -419,7 +419,8 @@ func main() {
 		panic(fmt.Sprintf("Ошибка инициализации логгера: %v", err))
 	}
 
-        ctx = context.WithValue(ctx, "logger", logger)
+        // Создаем контекст с логгером
+        ctx := context.WithValue(context.Background(), "logger", logger)
 
 	// Проверка переменных окружения
 	requiredVars := []struct {
