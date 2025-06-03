@@ -57,20 +57,22 @@ type YandexTranslationResponse struct {
 
 // Инициализация логгера
 func setupLogger() (*slog.Logger, error) {
-	logFile, err := os.OpenFile(LogFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if err != nil {
-		return nil, fmt.Errorf("не удалось открыть лог-файл: %w", err)
-	}
+    logFile, err := os.OpenFile(LogFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+    if err != nil {
+        return nil, fmt.Errorf("не удалось открыть лог-файл: %w", err)
+    }
 
-	logger := slog.New(
-		slog.NewJSONHandler(io.MultiWriter(os.Stdout, logFile), &slog.HandlerOptions{
-			Level:     slog.LevelDebug,
-			AddSource: true,
-		},
-	)
-
-	slog.SetDefault(logger)
-	return logger, nil
+    handler := slog.NewJSONHandler(
+        io.MultiWriter(os.Stdout, logFile),
+        &slog.HandlerOptions{
+            Level:     slog.LevelDebug,
+            AddSource: true,
+        },
+    )
+    
+    logger := slog.New(handler)
+    slog.SetDefault(logger)
+    return logger, nil
 }
 
 // HTTP-клиент с логированием
