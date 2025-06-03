@@ -31,7 +31,7 @@ const (
 	MaxRetries         = 3
 	RetryDelay         = 5 * time.Second
 	LogFile            = "zerohedge_monitor.log"
-	CheckInterval      = 30 * time.Minute // Интервал проверки
+	CheckInterval      = 720 * time.Minute // Интервал проверки
 	MaxSummaryLength   = 4000             // Максимальная длина для Telegram
 	SummarySentences   = 5                // Количество предложений для сокращения
 )
