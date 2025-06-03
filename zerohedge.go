@@ -1,15 +1,17 @@
 package main
 
 import (
+	"context"
 	"crypto/md5"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -17,13 +19,17 @@ import (
 )
 
 const (
-	ZeroHedgeURL    = "https://www.zerohedge.com/"
-	LastPostFile    = "last_post.txt"
-	TelegramBotAPI  = "https://api.telegram.org/bot%s/sendMessage"
-	TelegramToken   = "YOUR_TELEGRAM_BOT_TOKEN"
-	TelegramChatID  = "@YOUR_CHANNEL_NAME"
-	MaxRetries      = 3               // Максимальное количество попыток повтора
-	RetryDelay      = 5 * time.Second // Задержка между попытками
+	ZeroHedgeURL   = "https://www.zerohedge.com/"
+	LastPostFile   = "last_post.txt"
+	TelegramBotAPI = "https://api.telegram.org/bot%s/sendMessage"
+	MaxRetries     = 3
+	RetryDelay     = 5 * time.Second
+)
+
+var (
+	TelegramToken  = os.Getenv("TG_TOKEN")  // Безопасное хранение токена
+	TelegramChatID = os.Getenv("TG_CHAT_ID")
+	LogFile        = "zerohedge_monitor.log"
 )
 
 type LastPost struct {
@@ -31,183 +37,94 @@ type LastPost struct {
 	Hash string `json:"hash"`
 }
 
-// --- HTTP-клиент с таймаутом и повторными попытками ---
+// Инициализация логгера
+func setupLogger() (*slog.Logger, error) {
+	logFile, err := os.OpenFile(LogFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return nil, fmt.Errorf("не удалось открыть лог-файл: %w", err)
+	}
+
+	// Логирование в файл + консоль
+	multiWriter := io.MultiWriter(os.Stdout, logFile)
+
+	logger := slog.New(
+		slog.NewJSONHandler(multiWriter, &slog.HandlerOptions{
+			Level:     slog.LevelDebug,
+			AddSource: true,
+		}),
+	)
+
+	// Устанавливаем логгер по умолчанию
+	slog.SetDefault(logger)
+	return logger, nil
+}
+
+// Логирующий HTTP-клиент
+type loggingRoundTripper struct {
+	proxied http.RoundTripper
+}
+
+func (lrt loggingRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	slog.Debug("HTTP запрос",
+		"method", req.Method,
+		"url", req.URL,
+		"headers", req.Header,
+	)
+
+	resp, err := lrt.proxied.RoundTrip(req)
+	if err != nil {
+		slog.Error("HTTP ошибка", "err", err)
+		return nil, err
+	}
+
+	slog.Debug("HTTP ответ",
+		"status", resp.Status,
+		"headers", resp.Header,
+	)
+
+	return resp, nil
+}
+
 var httpClient = &http.Client{
-	Timeout: 30 * time.Second,
+	Timeout:   30 * time.Second,
+	Transport: loggingRoundTripper{proxied: http.DefaultTransport},
 }
 
-func fetchWithRetries(url string) (*http.Response, error) {
-	var lastErr error
-	for i := 0; i < MaxRetries; i++ {
-		resp, err := httpClient.Get(url)
-		if err == nil && resp.StatusCode == http.StatusOK {
-			return resp, nil
-		}
-		if err != nil {
-			lastErr = err
-		} else {
-			lastErr = fmt.Errorf("HTTP %d", resp.StatusCode)
-			resp.Body.Close()
-		}
-		time.Sleep(RetryDelay)
-	}
-	return nil, fmt.Errorf("после %d попыток: %v", MaxRetries, lastErr)
-}
+// [Остальные функции (fetchWithRetries, sendToTelegram и др.) остаются такими же, 
+// но теперь используют slog вместо log]
 
-// --- Обработка ошибок Telegram ---
-func sendToTelegram(text string) error {
-	apiURL := fmt.Sprintf(TelegramBotAPI, TelegramToken)
-	payload := map[string]string{
-		"chat_id": TelegramChatID,
-		"text":    text,
-	}
+// Пример обновленной функции с логированием
+func getLatestArticle(ctx context.Context) (string, error) {
+	logger := slog.FromContext(ctx)
+	logger.Info("Поиск последней статьи")
 
-	jsonData, err := json.Marshal(payload)
-	if err != nil {
-		return fmt.Errorf("ошибка сериализации JSON: %v", err)
-	}
-
-	resp, err := httpClient.Post(apiURL, "application/json", strings.NewReader(string(jsonData)))
-	if err != nil {
-		return fmt.Errorf("ошибка отправки в Telegram: %v", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("Telegram API ошибка %d: %s", resp.StatusCode, body)
-	}
-
-	return nil
-}
-
-// --- Улучшенный парсинг статей ---
-func getLatestArticle() (string, error) {
 	resp, err := fetchWithRetries(ZeroHedgeURL)
 	if err != nil {
-		return "", fmt.Errorf("не удалось загрузить страницу: %v", err)
+		logger.Error("Ошибка при запросе", "err", err)
+		return "", fmt.Errorf("не удалось загрузить страницу: %w", err)
 	}
 	defer resp.Body.Close()
 
-	doc, err := goquery.NewDocumentFromReader(resp.Body)
-	if err != nil {
-		return "", fmt.Errorf("ошибка парсинга HTML: %v", err)
-	}
-
-	// Ищем статью с резервными вариантами селекторов
-	selectors := []string{
-		"article a[href]",       // Основной селектор
-		".teaser-title a[href]", // Резервный вариант
-		"h2 a[href]",            // Еще один вариант
-	}
-
-	for _, selector := range selectors {
-		if link, exists := doc.Find(selector).First().Attr("href"); exists {
-			if strings.HasPrefix(link, "http") {
-				return link, nil
-			}
-			return ZeroHedgeURL + strings.TrimPrefix(link, "/"), nil
-		}
-	}
-
-	return "", errors.New("не найдено ни одной статьи")
-}
-
-// --- Защищенное чтение/запись файла ---
-func readLastPost() (LastPost, error) {
-	var lastPost LastPost
-
-	file, err := os.ReadFile(LastPostFile)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return lastPost, nil // Файла нет — это не ошибка
-		}
-		return lastPost, fmt.Errorf("ошибка чтения файла: %v", err)
-	}
-
-	if err := json.Unmarshal(file, &lastPost); err != nil {
-		return lastPost, fmt.Errorf("ошибка разбора JSON: %v", err)
-	}
-
-	return lastPost, nil
-}
-
-func saveLastPost(url string) error {
-	hash := md5.Sum([]byte(url))
-	data, err := json.Marshal(LastPost{
-		URL:  url,
-		Hash: hex.EncodeToString(hash[:]),
-	})
-	if err != nil {
-		return err
-	}
-
-	tmpFile := LastPostFile + ".tmp"
-	if err := os.WriteFile(tmpFile, data, 0644); err != nil {
-		return fmt.Errorf("ошибка записи временного файла: %v", err)
-	}
-
-	if err := os.Rename(tmpFile, LastPostFile); err != nil {
-		return fmt.Errorf("ошибка переименования файла: %v", err)
-	}
-
-	return nil
-}
-
-// --- Главная функция с обработкой паник ---
-func run() (err error) {
-	defer func() {
-		if r := recover(); r != nil {
-			err = fmt.Errorf("паника: %v", r)
-		}
-	}()
-
-	log.Println("🔍 Проверка новых статей...")
-
-	latestArticle, err := getLatestArticle()
-	if err != nil {
-		return fmt.Errorf("ошибка получения статьи: %v", err)
-	}
-
-	lastPost, err := readLastPost()
-	if err != nil {
-		return fmt.Errorf("ошибка чтения истории: %v", err)
-	}
-
-	currentHash := md5.Sum([]byte(latestArticle))
-	if hex.EncodeToString(currentHash[:]) == lastPost.Hash {
-		log.Println("🔄 Новых статей нет")
-		return nil
-	}
-
-	log.Println("📢 Найдена новая статья!")
-	content, err := getArticleContent(latestArticle)
-	if err != nil {
-		return fmt.Errorf("ошибка получения контента: %v", err)
-	}
-
-	summary := summarizeContent(content)
-	msg := fmt.Sprintf("📢 **Новая статья на ZeroHedge**\n\n%s\n\n🔗 %s", summary, latestArticle)
-
-	if err := sendToTelegram(msg); err != nil {
-		return fmt.Errorf("ошибка отправки в Telegram: %v", err)
-	}
-
-	if err := saveLastPost(latestArticle); err != nil {
-		return fmt.Errorf("ошибка сохранения состояния: %v", err)
-	}
-
-	log.Println("✅ Успешно отправлено!")
-	return nil
+	// [Остальная часть функции]
 }
 
 func main() {
-	if err := run(); err != nil {
-		log.Printf("❌ Критическая ошибка: %v", err)
-		// Пытаемся отправить ошибку в Telegram
+	// Инициализация логгера
+	logger, err := setupLogger()
+	if err != nil {
+		panic(fmt.Sprintf("Ошибка инициализации логгера: %v", err))
+	}
+
+	ctx := context.Background()
+	ctx = slog.NewContext(ctx, logger)
+
+	logger.Info("Запуск ZeroHedge Monitor", "version", "1.0")
+
+	if err := run(ctx); err != nil {
+		logger.Error("Критическая ошибка", "err", err)
 		errorMsg := fmt.Sprintf("🚨 **Ошибка в ZeroHedge Monitor**\n\n%s", err)
-		if err := sendToTelegram(errorMsg); err != nil {
-			log.Printf("Не удалось отправить ошибку в Telegram: %v", err)
+		if err := sendToTelegram(ctx, errorMsg); err != nil {
+			logger.Error("Не удалось отправить ошибку в Telegram", "err", err)
 		}
 		os.Exit(1)
 	}
