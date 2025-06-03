@@ -1,0 +1,14 @@
+# /etc/systemd/system/zerohedge-monitor.service
+[Unit]
+Description=ZeroHedge Monitor
+After=network.target
+
+[Service]
+User=your_user
+WorkingDirectory=/path/to/app
+EnvironmentFile=/path/to/app/.env
+ExecStart=/path/to/app/zerohedge.sh start
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
