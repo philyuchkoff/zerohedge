@@ -258,7 +258,7 @@ func sendToTelegram(ctx context.Context, text string, images []string) error {
 }
 
 func processArticle(ctx context.Context, articleURL, articleTitle string) error {
-	logger := slog.FromContext(ctx)
+	logger := ctx.Value("logger").(*slog.Logger)
 
 	// Получаем текст статьи и изображения
 	content, images, err := getArticleContent(ctx, articleURL)
@@ -355,7 +355,7 @@ func saveLastPost(url string) error {
 
 // Главная функция
 func run(ctx context.Context) error {
-	logger := slog.FromContext(ctx)
+	logger := ctx.Value("logger").(*slog.Logger)
 	logger.Info("Запуск мониторинга ZeroHedge")
 
 	ticker := time.NewTicker(CheckInterval)
@@ -419,7 +419,7 @@ func main() {
 		panic(fmt.Sprintf("Ошибка инициализации логгера: %v", err))
 	}
 
-	ctx := slog.NewContext(context.Background(), logger)
+        ctx = context.WithValue(ctx, "logger", logger)
 
 	// Проверка переменных окружения
 	requiredVars := []struct {
