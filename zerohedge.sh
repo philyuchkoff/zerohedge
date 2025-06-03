@@ -29,4 +29,4 @@ mkdir -p logs
 
 # Запуск монитора
 echo "Запуск ZeroHedge монитора..."
-./zerohedge_monitor 2>&1 | tee -a logs/zerohedge_monitor.log
+./zerohedge 2>&1 | tee -a logs/zerohedge.log
