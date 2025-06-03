@@ -3,10 +3,10 @@
 
 ## Установка зависимостей
 
-    go mod init zerohedge-monitor
+    go mod init zerohedge
     go get github.com/PuerkitoBio/goquery
 
 ## Запуск
-    go run main.go
+    go run zerohedge.go
 
 Можно добавить в крон
