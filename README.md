@@ -1,5 +1,5 @@
 # zerohedge.com parser
-Саммари на русском языке новых статей с сайта https://www.zerohedge.com/ и отправка саммари в Telegram [@zerohedge_ru](https://t.me/zerohedge_ru)
+Раз в сутки (время можно править в `CheckInterval`) получает новые статьи с сайта https://www.zerohedge.com/ и отправляет их перевод переводит с помощью Яндекс-переводчика) на русский язык в Telegram [@zerohedge_ru](https://t.me/zerohedge_ru)
 
 # Как запустить
 
