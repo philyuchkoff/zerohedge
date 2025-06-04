@@ -89,6 +89,19 @@ var httpClient = &http.Client{
 	Timeout: 30 * time.Second,
 }
 
+func stripHTMLTags(html string) string {
+    // Заменяем HTML-сущности
+    html = strings.ReplaceAll(html, "&lt;", "<")
+    html = strings.ReplaceAll(html, "&gt;", ">")
+    html = strings.ReplaceAll(html, "&amp;", "&")
+    html = strings.ReplaceAll(html, "&quot;", `"`)
+    html = strings.ReplaceAll(html, "&apos;", "'")
+    
+    // Удаляем все HTML-теги
+    re := regexp.MustCompile(`<[^>]*>`)
+    return strings.TrimSpace(re.ReplaceAllString(html, ""))
+}
+
 func fetchRSSFeed(ctx context.Context) (*RSS, error) {
 	req, err := http.NewRequestWithContext(ctx, "GET", RSSURL, nil)
 	if err != nil {
