@@ -43,7 +43,7 @@ const (
 	LogFile           = "zerohedge.log"
 	CheckInterval     = 1 * time.Minute
 	MaxSummaryLength  = 4000
-	SummarySentences  = 5
+	SummarySentences  = 5 // Количество предложений для сокращения
 	MaxArticlesToSend = 3 // Сколько новых статей отправлять за раз
 )
 
@@ -188,8 +188,8 @@ func sendToTelegram(ctx context.Context, text string) error {
 	return nil
 }
 
-func intelligentSummary(text string, maxLen int) string {
-	if len(text) <= maxLen {
+func intelligentSummary(text string) string {
+	if len(text) <= MaxSummaryLength {
 		return text
 	}
 
@@ -197,14 +197,15 @@ func intelligentSummary(text string, maxLen int) string {
 	matches := r.FindAllString(text, -1)
 
 	if len(matches) > 0 {
-		if SummarySentences > len(matches) {
-			SummarySentences = len(matches)
+		sentences := SummarySentences
+		if sentences > len(matches) {
+			sentences = len(matches)
 		}
-		summary := strings.Join(matches[:SummarySentences], " ")
+		summary := strings.Join(matches[:sentences], " ")
 		return strings.TrimSpace(summary) + "…"
 	}
 
-	return text[:maxLen] + "…"
+	return text[:MaxSummaryLength] + "…"
 }
 
 func readLastPost() (LastPost, error) {
@@ -287,7 +288,7 @@ func processNewArticles(ctx context.Context, logger *slog.Logger) error {
 			continue
 		}
 
-		summary := intelligentSummary(translation, MaxSummaryLength)
+		summary := intelligentSummary(translation)
 		message := fmt.Sprintf(
 			"<b>📌 %s</b>\n\n%s\n\n<b>📅 %s</b>\n🔗 <a href=\"%s\">Read full article</a>",
 			item.Title,
@@ -308,8 +309,7 @@ func processNewArticles(ctx context.Context, logger *slog.Logger) error {
 	return nil
 }
 
-func run(ctx context.Context) error {
-	logger := slog.FromContext(ctx)
+func run(ctx context.Context, logger *slog.Logger) error {
 	logger.Info("Starting ZeroHedge RSS monitor")
 
 	ticker := time.NewTicker(CheckInterval)
@@ -360,9 +360,7 @@ func main() {
 	}
 
 	ctx := context.Background()
-	ctx = context.WithValue(ctx, "logger", logger)
-
-	if err := run(ctx); err != nil {
+	if err := run(ctx, logger); err != nil {
 		logger.Error("Critical error", "err", err)
 		errorMsg := fmt.Sprintf("🚨 ZeroHedge Monitor error:\n\n%s", err)
 		if err := sendToTelegram(ctx, errorMsg); err != nil {
