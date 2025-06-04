@@ -28,7 +28,7 @@ const (
 	YandexTranslate    = "https://translate.api.cloud.yandex.net/translate/v2/translate"
 	MaxRetries         = 3
 	RetryDelay         = 5 * time.Second
-	LogFile            = "zerohedge_monitor.log"
+	LogFile            = "zerohedge.log"
 	CheckInterval      = 1 * time.Minute // Интервал проверки
 	MaxSummaryLength   = 4000             // Максимальная длина для Telegram
 	SummarySentences   = 5                // Количество предложений для сокращения
@@ -176,6 +176,7 @@ func getLatestArticle(ctx context.Context) (string, string, error) {
         slog.Error("Не найдена ссылка в статье", "article_html", html)
         return "", "", errors.New("ссылка не найдена")
     }
+}
 
 func getArticleContent(ctx context.Context, url string) (string, []string, error) {
     resp, err := httpClient.Get(url)
