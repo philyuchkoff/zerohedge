@@ -145,44 +145,55 @@ func translateWithYandex(ctx context.Context, text string) (string, error) {
 func getLatestArticle(ctx context.Context) (string, string, error) {
     ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
     defer cancel()
-    resp, err := httpClient.Get(ZeroHedgeURL)
+    
+    req, err := http.NewRequest("GET", ZeroHedgeURL, nil)
+    if err != nil {
+        return "", "", fmt.Errorf("ошибка создания запроса: %w", err)
+    }
+    
+    // Устанавливаем User-Agent как браузер
+    req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
+    
+    resp, err := httpClient.Do(req)
     if err != nil {
         return "", "", fmt.Errorf("ошибка запроса: %w", err)
     }
     defer resp.Body.Close()
 
-    bodyBytes, _ := io.ReadAll(resp.Body)
-    os.WriteFile("debug_page.html", bodyBytes, 0644)
-    slog.Info("Страница сохранена в debug_page.html")
-
-    doc, err := goquery.NewDocumentFromReader(bytes.NewReader(bodyBytes))
+    doc, err := goquery.NewDocumentFromReader(resp.Body)
     if err != nil {
         return "", "", fmt.Errorf("ошибка парсинга: %w", err)
     }
 
-    // Улучшенный селектор для статьи
-    article := doc.Find("article.teaser, div.teaser, div.node--type-article").First()
+    // Попробуйте эти альтернативные селекторы:
+    article := doc.Find(`article, .node-article, .teaser, [class*="article"]`).First()
     if article == nil {
-        return "", "", errors.New("статья не найдена (новые селекторы тоже не сработали)")
+        html, _ := doc.Html()
+        os.WriteFile("debug_full_page.html", []byte(html), 0644)
+        return "", "", errors.New("не удалось найти контейнер статьи")
     }
 
-    // Ищем ссылку и заголовок более гибко:
-    link, exists := article.Find("a[href]").First().Attr("href")
+    // Ищем ссылку в статье
+    linkElem := article.Find(`a[href*="/"]`).First()
+    if linkElem == nil {
+        return "", "", errors.New("не найдена ссылка в статье")
+    }
+
+    link, exists := linkElem.Attr("href")
     if !exists {
-        // Логируем HTML для отладки
-        html, _ := article.Html()
-        slog.Error("Не найдена ссылка в статье", "article_html", html)
-        return "", "", errors.New("ссылка не найдена")
+        return "", "", errors.New("у элемента нет атрибута href")
     }
 
-    title := article.Find("h2, h3, h4").First().Text()
+    // Получаем заголовок
+    title := strings.TrimSpace(article.Find("h1, h2, h3, h4, [class*='title']").First().Text())
 
+    // Нормализуем ссылку
     if !strings.HasPrefix(link, "http") {
         link = ZeroHedgeURL + strings.TrimPrefix(link, "/")
     }
 
-    return link, strings.TrimSpace(title), nil
-} 
+    return link, title, nil
+}
 
 func getArticleContent(ctx context.Context, url string) (string, []string, error) {
     resp, err := httpClient.Get(url)
