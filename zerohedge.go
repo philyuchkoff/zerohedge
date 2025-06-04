@@ -151,6 +151,12 @@ func getLatestArticle(ctx context.Context) (string, string, error) {
 	}
 	defer resp.Body.Close()
 
+	bodyBytes, _ := io.ReadAll(resp.Body)
+        os.WriteFile("debug_page.html", bodyBytes, 0644)
+        slog.Info("Страница сохранена в debug_page.html")
+
+        doc, err := goquery.NewDocumentFromReader(bytes.NewReader(bodyBytes))
+	
 	doc, err := goquery.NewDocumentFromReader(resp.Body)
 	if err != nil {
 		return "", "", fmt.Errorf("ошибка парсинга: %w", err)
