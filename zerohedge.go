@@ -356,6 +356,16 @@ func processNewArticles(ctx context.Context, logger *slog.Logger) error {
 			content = item.Title
 		}
 
+		// Очищаем от HTML-тегов перед переводом
+   		cleanContent := stripHTMLTags(content)
+    
+    		// Переводим очищенный текст
+    		translation, err := translateWithYandex(ctx, cleanContent)
+   		if err != nil {
+        		logger.Error("Translation error", "err", err, "url", item.Link)
+       			continue
+   		}
+		
 		translation, err := translateWithYandex(ctx, content)
 		if err != nil {
 			logger.Error("Translation error", "err", err, "url", item.Link)
