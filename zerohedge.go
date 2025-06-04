@@ -29,7 +29,7 @@ const (
 	MaxRetries         = 3
 	RetryDelay         = 5 * time.Second
 	LogFile            = "zerohedge_monitor.log"
-	CheckInterval      = 720 * time.Minute // Интервал проверки
+	CheckInterval      = 1 * time.Minute // Интервал проверки
 	MaxSummaryLength   = 4000             // Максимальная длина для Telegram
 	SummarySentences   = 5                // Количество предложений для сокращения
 )
@@ -143,6 +143,8 @@ func translateWithYandex(ctx context.Context, text string) (string, error) {
 }
 
 func getLatestArticle(ctx context.Context) (string, string, error) {
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
 	resp, err := httpClient.Get(ZeroHedgeURL)
 	if err != nil {
 		return "", "", fmt.Errorf("ошибка запроса: %w", err)
@@ -361,6 +363,8 @@ func run(ctx context.Context) error {
 	ticker := time.NewTicker(CheckInterval)
 	defer ticker.Stop()
 
+	logger.Info("RUN: Таймер создан", "interval", CheckInterval) 
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -402,6 +406,12 @@ func run(ctx context.Context) error {
 }
 
 func main() {
+	slog.Info("MAIN: Начало выполнения")
+	slog.Info("Параметры окружения",
+            "CheckInterval", CheckInterval,
+            "ZeroHedgeURL", ZeroHedgeURL,
+            "TelegramToken", TelegramToken != "",
+            "YandexAPIKey", YandexAPIKey != "")
 	// Загрузка .env файла
 	if err := godotenv.Load(); err != nil {
 		fmt.Println("Не удалось загрузить .env файл:", err)
