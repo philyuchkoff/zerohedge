@@ -205,7 +205,7 @@ func min(a, b int) int {
 }
 
 func sendToTelegram(ctx context.Context, text string) error {
-	logger := logger := slog.Default()
+	logger := slog.Default()
 	apiURL := fmt.Sprintf(TelegramBotAPI, TelegramToken)
 
 	// Разбиваем сообщение с запасом для HTML-тегов
