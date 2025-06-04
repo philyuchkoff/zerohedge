@@ -177,7 +177,7 @@ func getLatestArticle(ctx context.Context) (string, string, error) {
         return "", "", errors.New("ссылка не найдена")
     }
 
-func getArticleContent(ctx context.Context, url string) (string, []string, error) {
+func getArticleContent(ctx context.Context, url []string, error) {
 	resp, err := httpClient.Get(url)
 	if err != nil {
 		return "", nil, fmt.Errorf("ошибка запроса: %w", err)
