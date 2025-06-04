@@ -89,19 +89,6 @@ var httpClient = &http.Client{
 	Timeout: 30 * time.Second,
 }
 
-func stripHTMLTags(html string) string {
-    // Заменяем HTML-сущности
-    html = strings.ReplaceAll(html, "&lt;", "<")
-    html = strings.ReplaceAll(html, "&gt;", ">")
-    html = strings.ReplaceAll(html, "&amp;", "&")
-    html = strings.ReplaceAll(html, "&quot;", `"`)
-    html = strings.ReplaceAll(html, "&apos;", "'")
-    
-    // Удаляем все HTML-теги
-    re := regexp.MustCompile(`<[^>]*>`)
-    return strings.TrimSpace(re.ReplaceAllString(html, ""))
-}
-
 func fetchRSSFeed(ctx context.Context) (*RSS, error) {
 	req, err := http.NewRequestWithContext(ctx, "GET", RSSURL, nil)
 	if err != nil {
@@ -127,6 +114,26 @@ func fetchRSSFeed(ctx context.Context) (*RSS, error) {
 	}
 
 	return &rss, nil
+}
+
+func stripHTMLTags(html string) string {
+	// Заменяем HTML-сущности
+	html = strings.ReplaceAll(html, "&lt;", "<")
+	html = strings.ReplaceAll(html, "&gt;", ">")
+	html = strings.ReplaceAll(html, "&amp;", "&")
+	html = strings.ReplaceAll(html, "&quot;", `"`)
+	html = strings.ReplaceAll(html, "&apos;", "'")
+	
+	// Удаляем все HTML-теги
+	re := regexp.MustCompile(`<[^>]*>`)
+	return strings.TrimSpace(re.ReplaceAllString(html, ""))
+}
+
+func cleanText(text string) string {
+	text = stripHTMLTags(text)
+	// Заменяем множественные пробелы и переносы строк
+	re := regexp.MustCompile(`\s+`)
+	return strings.TrimSpace(re.ReplaceAllString(text, " "))
 }
 
 func translateWithYandex(ctx context.Context, text string) (string, error) {
@@ -187,13 +194,6 @@ func translateWithYandex(ctx context.Context, text string) (string, error) {
 	return strings.Join(translations, ""), nil
 }
 
-func escapeHTML(text string) string {
-	text = strings.ReplaceAll(text, "&", "&amp;")
-	text = strings.ReplaceAll(text, "<", "&lt;")
-	text = strings.ReplaceAll(text, ">", "&gt;")
-	return text
-}
-
 func isValidURL(rawURL string) bool {
 	u, err := url.ParseRequestURI(rawURL)
 	return err == nil && u.Scheme != "" && u.Host != ""
@@ -218,10 +218,10 @@ func min(a, b int) int {
 }
 
 func sendToTelegram(ctx context.Context, text string) error {
-	logger := slog.Default()
+	logger := ctx.Value("logger").(*slog.Logger)
 	apiURL := fmt.Sprintf(TelegramBotAPI, TelegramToken)
 
-	// Разбиваем сообщение с запасом для HTML-тегов
+	// Разбиваем сообщение с запасом
 	parts := splitMessage(text, TelegramMaxText-100)
 	for i, part := range parts {
 		payload := map[string]string{
@@ -351,21 +351,11 @@ func processNewArticles(ctx context.Context, logger *slog.Logger) error {
 			continue
 		}
 
-		content := item.Description
+		content := cleanText(item.Description)
 		if content == "" {
-			content = item.Title
+			content = cleanText(item.Title)
 		}
 
-		// Очищаем от HTML-тегов перед переводом
-   		cleanContent := stripHTMLTags(content)
-    
-    		// Переводим очищенный текст
-    		translation, err := translateWithYandex(ctx, cleanContent)
-   		if err != nil {
-        		logger.Error("Translation error", "err", err, "url", item.Link)
-       			continue
-   		}
-		
 		translation, err := translateWithYandex(ctx, content)
 		if err != nil {
 			logger.Error("Translation error", "err", err, "url", item.Link)
@@ -375,9 +365,9 @@ func processNewArticles(ctx context.Context, logger *slog.Logger) error {
 		summary := intelligentSummary(translation)
 		message := fmt.Sprintf(
 			"<b>📌 %s</b>\n\n%s\n\n<b>📅 %s</b>\n🔗 <a href=\"%s\">Read full article</a>",
-			escapeHTML(item.Title),
-			escapeHTML(summary),
-			escapeHTML(item.PubDate),
+			cleanText(item.Title),
+			summary,
+			cleanText(item.PubDate),
 			item.Link,
 		)
 
@@ -443,7 +433,7 @@ func main() {
 		}
 	}
 
-	ctx := context.Background()
+	ctx := context.WithValue(context.Background(), "logger", logger)
 	if err := run(ctx, logger); err != nil {
 		logger.Error("Critical error", "err", err)
 		errorMsg := fmt.Sprintf("🚨 ZeroHedge Monitor error:\n\n%s", err)
