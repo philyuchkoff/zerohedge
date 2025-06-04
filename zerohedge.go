@@ -42,7 +42,7 @@ const (
 	RetryDelay        = 5 * time.Second
 	LogFile           = "zerohedge.log"
 	CheckInterval     = 1 * time.Minute
-	MaxSummaryLength  = 4000
+	MaxSummaryLength  = 3000
 	SummarySentences  = 5 // Количество предложений для сокращения
 	MaxArticlesToSend = 3 // Сколько новых статей отправлять за раз
 )
