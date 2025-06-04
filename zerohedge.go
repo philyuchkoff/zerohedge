@@ -40,7 +40,7 @@ const (
 	MaxRetries        = 3
 	RetryDelay        = 5 * time.Second
 	LogFile           = "zerohedge.log"
-	CheckInterval     = 1 * time.Minute
+	CheckInterval     = 1440 * time.Minute
 	MaxSummaryLength  = 1000 // Ограничиваем перевод первыми 1000 символов
 	SummarySentences  = 5
 	MaxArticlesToSend = 3
