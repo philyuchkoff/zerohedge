@@ -12,6 +12,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"regexp"
 	"strings"
@@ -20,7 +21,6 @@ import (
 	"github.com/joho/godotenv"
 )
 
-// RSS структуры
 type RSS struct {
 	Channel struct {
 		Items []struct {
@@ -32,7 +32,6 @@ type RSS struct {
 	} `xml:"channel"`
 }
 
-// Конфигурация
 const (
 	RSSURL            = "https://cms.zerohedge.com/fullrss2.xml"
 	LastPostFile      = "last_post.txt"
@@ -42,11 +41,11 @@ const (
 	RetryDelay        = 5 * time.Second
 	LogFile           = "zerohedge.log"
 	CheckInterval     = 1 * time.Minute
-	MaxSummaryLength  = 5000 // Увеличено до 5000 символов
+	MaxSummaryLength  = 5000
 	SummarySentences  = 5
 	MaxArticlesToSend = 3
-	YandexMaxTextSize = 10000 // Лимит Yandex Translate
-	TelegramMaxText   = 4096  // Лимит Telegram
+	YandexMaxTextSize = 10000
+	TelegramMaxText   = 4096
 )
 
 var (
@@ -105,7 +104,8 @@ func fetchRSSFeed(ctx context.Context) (*RSS, error) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("RSS feed returned status: %d", resp.StatusCode)
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("RSS feed returned status: %d, body: %s", resp.StatusCode, body)
 	}
 
 	var rss RSS
@@ -121,7 +121,6 @@ func translateWithYandex(ctx context.Context, text string) (string, error) {
 		return "", errors.New("Yandex API keys not set")
 	}
 
-	// Разбиваем текст на части по лимиту Yandex
 	var translations []string
 	for i := 0; i < len(text); i += YandexMaxTextSize {
 		end := i + YandexMaxTextSize
@@ -175,19 +174,46 @@ func translateWithYandex(ctx context.Context, text string) (string, error) {
 	return strings.Join(translations, ""), nil
 }
 
-func sendToTelegram(ctx context.Context, text string) error {
-	// Разбиваем длинные сообщения для Telegram
-	for i := 0; i < len(text); i += TelegramMaxText {
-		end := i + TelegramMaxText
-		if end > len(text) {
-			end = len(text)
-		}
-		chunk := text[i:end]
+func escapeHTML(text string) string {
+	text = strings.ReplaceAll(text, "&", "&amp;")
+	text = strings.ReplaceAll(text, "<", "&lt;")
+	text = strings.ReplaceAll(text, ">", "&gt;")
+	return text
+}
 
-		apiURL := fmt.Sprintf(TelegramBotAPI, TelegramToken)
+func isValidURL(rawURL string) bool {
+	u, err := url.ParseRequestURI(rawURL)
+	return err == nil && u.Scheme != "" && u.Host != ""
+}
+
+func splitMessage(text string, maxLen int) []string {
+	var parts []string
+	for len(text) > 0 {
+		partLen := min(maxLen, len(text))
+		part := text[:partLen]
+		text = text[partLen:]
+		parts = append(parts, part)
+	}
+	return parts
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func sendToTelegram(ctx context.Context, text string) error {
+	logger := slog.FromContext(ctx)
+	apiURL := fmt.Sprintf(TelegramBotAPI, TelegramToken)
+
+	// Разбиваем сообщение с запасом для HTML-тегов
+	parts := splitMessage(text, TelegramMaxText-100)
+	for i, part := range parts {
 		payload := map[string]string{
 			"chat_id":    TelegramChatID,
-			"text":       chunk,
+			"text":       part,
 			"parse_mode": "HTML",
 		}
 
@@ -203,11 +229,17 @@ func sendToTelegram(ctx context.Context, text string) error {
 		defer resp.Body.Close()
 
 		if resp.StatusCode != http.StatusOK {
-			return fmt.Errorf("status %d", resp.StatusCode)
+			body, _ := io.ReadAll(resp.Body)
+			logger.Error("Telegram API error",
+				"status", resp.StatusCode,
+				"response", string(body),
+				"part", i+1,
+				"total_parts", len(parts),
+				"part_length", len(part))
+			return fmt.Errorf("status %d: %s", resp.StatusCode, body)
 		}
 
-		// Задержка между сообщениями
-		if i+TelegramMaxText < len(text) {
+		if i < len(parts)-1 {
 			time.Sleep(500 * time.Millisecond)
 		}
 	}
@@ -223,15 +255,11 @@ func intelligentSummary(text string) string {
 	matches := r.FindAllString(text, -1)
 
 	if len(matches) > 0 {
-		sentences := SummarySentences
-		if sentences > len(matches) {
-			sentences = len(matches)
-		}
+		sentences := min(SummarySentences, len(matches))
 		summary := strings.Join(matches[:sentences], " ")
 		return strings.TrimSpace(summary) + "…"
 	}
 
-	// Ищем последний пробел перед MaxSummaryLength
 	if spaceIndex := strings.LastIndex(text[:MaxSummaryLength], " "); spaceIndex > 0 {
 		return text[:spaceIndex] + "…"
 	}
@@ -305,9 +333,14 @@ func processNewArticles(ctx context.Context, logger *slog.Logger) error {
 			}
 		}
 
+		if !isValidURL(item.Link) {
+			logger.Error("Invalid URL in article", "url", item.Link)
+			continue
+		}
+
 		content := item.Description
 		if content == "" {
-			content = item.Title + ". Read more at the link below."
+			content = item.Title
 		}
 
 		translation, err := translateWithYandex(ctx, content)
@@ -319,9 +352,9 @@ func processNewArticles(ctx context.Context, logger *slog.Logger) error {
 		summary := intelligentSummary(translation)
 		message := fmt.Sprintf(
 			"<b>📌 %s</b>\n\n%s\n\n<b>📅 %s</b>\n🔗 <a href=\"%s\">Read full article</a>",
-			item.Title,
-			summary,
-			item.PubDate,
+			escapeHTML(item.Title),
+			escapeHTML(summary),
+			escapeHTML(item.PubDate),
 			item.Link,
 		)
 
