@@ -15,10 +15,20 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"encoding/xml"
+   	 "io"
 
-	"github.com/PuerkitoBio/goquery"
 	"github.com/joho/godotenv"
 )
+
+type RSS struct {
+    Channel struct {
+        Items []struct {
+            Title string `xml:"title"`
+            Link  string `xml:"link"`
+        } `xml:"item"`
+    } `xml:"channel"`
+}
 
 // Конфигурация
 const (
@@ -142,64 +152,37 @@ func translateWithYandex(ctx context.Context, text string) (string, error) {
 	return result.Translations[0].Text, nil
 }
 
-func getLatestArticle(ctx context.Context) (string, string, error) {
+func getLatestArticleFromRSS(ctx context.Context) (string, string, error) {
     ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
     defer cancel()
 
-    // 1. Настраиваем HTTP-запрос с User-Agent
-    req, err := http.NewRequest("GET", ZeroHedgeURL, nil)
+    resp, err := httpClient.Get("https://cms.zerohedge.com/fullrss2.xml")
     if err != nil {
-        return "", "", fmt.Errorf("ошибка создания запроса: %w", err)
-    }
-    req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-
-    // 2. Отправляем запрос
-    resp, err := httpClient.Do(req)
-    if err != nil {
-        return "", "", fmt.Errorf("ошибка запроса: %w", err)
+        return "", "", fmt.Errorf("ошибка запроса RSS: %w", err)
     }
     defer resp.Body.Close()
 
-    // 3. Проверяем статус
     if resp.StatusCode != http.StatusOK {
-        return "", "", fmt.Errorf("неверный статус: %d", resp.StatusCode)
+        return "", "", fmt.Errorf("неверный статус RSS: %d", resp.StatusCode)
     }
 
-    // 4. Парсим HTML
-    doc, err := goquery.NewDocumentFromReader(resp.Body)
+    data, err := io.ReadAll(resp.Body)
     if err != nil {
-        return "", "", fmt.Errorf("ошибка парсинга: %w", err)
+        return "", "", fmt.Errorf("ошибка чтения RSS: %w", err)
     }
 
-    // 5. Актуальные селекторы (июнь 2024)
-    article := doc.Find(`article.node-article, div.node-article, [data-history-node-id]`).First()
-    if article == nil {
-        return "", "", errors.New("контейнер статьи не найден")
+    var rss RSS
+    if err := xml.Unmarshal(data, &rss); err != nil {
+        return "", "", fmt.Errorf("ошибка парсинга RSS: %w", err)
     }
 
-    // 6. Ищем ссылку
-    linkElem := article.Find(`a[href*="/news/"]`).First()
-    if linkElem == nil {
-        return "", "", errors.New("ссылка не найдена")
+    if len(rss.Channel.Items) == 0 {
+        return "", "", errors.New("в RSS нет статей")
     }
 
-    link, exists := linkElem.Attr("href")
-    if !exists || link == "" {
-        return "", "", errors.New("пустая ссылка")
-    }
-
-    // 7. Извлекаем заголовок
-    title := strings.TrimSpace(article.Find("h2.title, h3.title, h2 a").First().Text())
-    if title == "" {
-        title = "Без заголовка"
-    }
-
-    // 8. Нормализуем URL
-    if !strings.HasPrefix(link, "http") {
-        link = strings.TrimRight(ZeroHedgeURL, "/") + "/" + strings.TrimLeft(link, "/")
-    }
-
-    return link, title, nil
+    // Берем самую свежую статью (первую в списке)
+    latest := rss.Channel.Items[0]
+    return latest.Link, latest.Title, nil
 }
 
 func getArticleContent(ctx context.Context, url string) (string, []string, error) {
