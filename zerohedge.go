@@ -42,9 +42,11 @@ const (
 	RetryDelay        = 5 * time.Second
 	LogFile           = "zerohedge.log"
 	CheckInterval     = 1 * time.Minute
-	MaxSummaryLength  = 1000
-	SummarySentences  = 5 // Количество предложений для сокращения
-	MaxArticlesToSend = 3 // Сколько новых статей отправлять за раз
+	MaxSummaryLength  = 5000 // Увеличено до 5000 символов
+	SummarySentences  = 5
+	MaxArticlesToSend = 3
+	YandexMaxTextSize = 10000 // Лимит Yandex Translate
+	TelegramMaxText   = 4096  // Лимит Telegram
 )
 
 var (
@@ -119,72 +121,96 @@ func translateWithYandex(ctx context.Context, text string) (string, error) {
 		return "", errors.New("Yandex API keys not set")
 	}
 
-	payload := map[string]interface{}{
-		"folder_id":           YandexFolderID,
-		"texts":              []string{text},
-		"targetLanguageCode": "ru",
+	// Разбиваем текст на части по лимиту Yandex
+	var translations []string
+	for i := 0; i < len(text); i += YandexMaxTextSize {
+		end := i + YandexMaxTextSize
+		if end > len(text) {
+			end = len(text)
+		}
+		chunk := text[i:end]
+
+		payload := map[string]interface{}{
+			"folder_id":           YandexFolderID,
+			"texts":              []string{chunk},
+			"targetLanguageCode": "ru",
+		}
+
+		jsonData, err := json.Marshal(payload)
+		if err != nil {
+			return "", fmt.Errorf("serialization error: %w", err)
+		}
+
+		req, err := http.NewRequestWithContext(ctx, "POST", YandexTranslate, bytes.NewBuffer(jsonData))
+		if err != nil {
+			return "", fmt.Errorf("request creation error: %w", err)
+		}
+
+		req.Header.Set("Authorization", "Api-Key "+YandexAPIKey)
+		req.Header.Set("Content-Type", "application/json")
+
+		resp, err := httpClient.Do(req)
+		if err != nil {
+			return "", fmt.Errorf("request error: %w", err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			body, _ := io.ReadAll(resp.Body)
+			return "", fmt.Errorf("status %d: %s", resp.StatusCode, body)
+		}
+
+		var result YandexTranslationResponse
+		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+			return "", fmt.Errorf("JSON decode error: %w", err)
+		}
+
+		if len(result.Translations) == 0 {
+			return "", errors.New("empty API response")
+		}
+
+		translations = append(translations, result.Translations[0].Text)
 	}
 
-	jsonData, err := json.Marshal(payload)
-	if err != nil {
-		return "", fmt.Errorf("serialization error: %w", err)
-	}
-
-	req, err := http.NewRequestWithContext(ctx, "POST", YandexTranslate, bytes.NewBuffer(jsonData))
-	if err != nil {
-		return "", fmt.Errorf("request creation error: %w", err)
-	}
-
-	req.Header.Set("Authorization", "Api-Key "+YandexAPIKey)
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("request error: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("status %d: %s", resp.StatusCode, body)
-	}
-
-	var result YandexTranslationResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return "", fmt.Errorf("JSON decode error: %w", err)
-	}
-
-	if len(result.Translations) == 0 {
-		return "", errors.New("empty API response")
-	}
-
-	return result.Translations[0].Text, nil
+	return strings.Join(translations, ""), nil
 }
 
 func sendToTelegram(ctx context.Context, text string) error {
-	apiURL := fmt.Sprintf(TelegramBotAPI, TelegramToken)
+	// Разбиваем длинные сообщения для Telegram
+	for i := 0; i < len(text); i += TelegramMaxText {
+		end := i + TelegramMaxText
+		if end > len(text) {
+			end = len(text)
+		}
+		chunk := text[i:end]
 
-	payload := map[string]string{
-		"chat_id":    TelegramChatID,
-		"text":       text,
-		"parse_mode": "HTML",
+		apiURL := fmt.Sprintf(TelegramBotAPI, TelegramToken)
+		payload := map[string]string{
+			"chat_id":    TelegramChatID,
+			"text":       chunk,
+			"parse_mode": "HTML",
+		}
+
+		jsonData, err := json.Marshal(payload)
+		if err != nil {
+			return fmt.Errorf("serialization error: %w", err)
+		}
+
+		resp, err := httpClient.Post(apiURL, "application/json", bytes.NewReader(jsonData))
+		if err != nil {
+			return fmt.Errorf("request error: %w", err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			return fmt.Errorf("status %d", resp.StatusCode)
+		}
+
+		// Задержка между сообщениями
+		if i+TelegramMaxText < len(text) {
+			time.Sleep(500 * time.Millisecond)
+		}
 	}
-
-	jsonData, err := json.Marshal(payload)
-	if err != nil {
-		return fmt.Errorf("serialization error: %w", err)
-	}
-
-	resp, err := httpClient.Post(apiURL, "application/json", bytes.NewReader(jsonData))
-	if err != nil {
-		return fmt.Errorf("request error: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("status %d", resp.StatusCode)
-	}
-
 	return nil
 }
 
@@ -205,6 +231,10 @@ func intelligentSummary(text string) string {
 		return strings.TrimSpace(summary) + "…"
 	}
 
+	// Ищем последний пробел перед MaxSummaryLength
+	if spaceIndex := strings.LastIndex(text[:MaxSummaryLength], " "); spaceIndex > 0 {
+		return text[:spaceIndex] + "…"
+	}
 	return text[:MaxSummaryLength] + "…"
 }
 
@@ -269,14 +299,12 @@ func processNewArticles(ctx context.Context, logger *slog.Logger) error {
 			break
 		}
 
-		// Для первой статьи обновляем last_post.txt
 		if i == 0 {
 			if err := saveLastPost(item.Link); err != nil {
 				return fmt.Errorf("error saving last post: %w", err)
 			}
 		}
 
-		// Используем описание из RSS вместо контента статьи
 		content := item.Description
 		if content == "" {
 			content = item.Title + ". Read more at the link below."
