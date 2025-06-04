@@ -143,27 +143,25 @@ func translateWithYandex(ctx context.Context, text string) (string, error) {
 }
 
 func getLatestArticle(ctx context.Context) (string, string, error) {
-	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
-	defer cancel()
-	resp, err := httpClient.Get(ZeroHedgeURL)
-	if err != nil {
-		return "", "", fmt.Errorf("ошибка запроса: %w", err)
-	}
-	defer resp.Body.Close()
+    ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+    defer cancel()
+    resp, err := httpClient.Get(ZeroHedgeURL)
+    if err != nil {
+        return "", "", fmt.Errorf("ошибка запроса: %w", err)
+    }
+    defer resp.Body.Close()
 
-	bodyBytes, _ := io.ReadAll(resp.Body)
-        os.WriteFile("debug_page.html", bodyBytes, 0644)
-        slog.Info("Страница сохранена в debug_page.html")
+    bodyBytes, _ := io.ReadAll(resp.Body)
+    os.WriteFile("debug_page.html", bodyBytes, 0644)
+    slog.Info("Страница сохранена в debug_page.html")
 
-        doc, err := goquery.NewDocumentFromReader(bytes.NewReader(bodyBytes))
-	
-	doc, err := goquery.NewDocumentFromReader(resp.Body)
-	if err != nil {
-		return "", "", fmt.Errorf("ошибка парсинга: %w", err)
-	}
+    doc, err := goquery.NewDocumentFromReader(bytes.NewReader(bodyBytes))
+    if err != nil {
+        return "", "", fmt.Errorf("ошибка парсинга: %w", err)
+    }
 
-	// Улучшенный селектор для статьи
-	    article := doc.Find("article.teaser, div.teaser, div.node--type-article").First()
+    // Улучшенный селектор для статьи
+    article := doc.Find("article.teaser, div.teaser, div.node--type-article").First()
     if article == nil {
         return "", "", errors.New("статья не найдена (новые селекторы тоже не сработали)")
     }
@@ -176,7 +174,15 @@ func getLatestArticle(ctx context.Context) (string, string, error) {
         slog.Error("Не найдена ссылка в статье", "article_html", html)
         return "", "", errors.New("ссылка не найдена")
     }
-}
+
+    title := article.Find("h2, h3, h4").First().Text()
+
+    if !strings.HasPrefix(link, "http") {
+        link = ZeroHedgeURL + strings.TrimPrefix(link, "/")
+    }
+
+    return link, strings.TrimSpace(title), nil
+} 
 
 func getArticleContent(ctx context.Context, url string) (string, []string, error) {
     resp, err := httpClient.Get(url)
