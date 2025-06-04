@@ -40,8 +40,8 @@ const (
 	MaxRetries        = 3
 	RetryDelay        = 5 * time.Second
 	LogFile           = "zerohedge.log"
-	CheckInterval     = 1440 * time.Minute
-	MaxSummaryLength  = 5000
+	CheckInterval     = 1 * time.Minute
+	MaxSummaryLength  = 1000 // Ограничиваем перевод первыми 1000 символов
 	SummarySentences  = 5
 	MaxArticlesToSend = 3
 	YandexMaxTextSize = 10000
@@ -117,23 +117,27 @@ func fetchRSSFeed(ctx context.Context) (*RSS, error) {
 }
 
 func stripHTMLTags(html string) string {
-	// Заменяем HTML-сущности
 	html = strings.ReplaceAll(html, "&lt;", "<")
 	html = strings.ReplaceAll(html, "&gt;", ">")
 	html = strings.ReplaceAll(html, "&amp;", "&")
 	html = strings.ReplaceAll(html, "&quot;", `"`)
 	html = strings.ReplaceAll(html, "&apos;", "'")
 	
-	// Удаляем все HTML-теги
 	re := regexp.MustCompile(`<[^>]*>`)
 	return strings.TrimSpace(re.ReplaceAllString(html, ""))
 }
 
 func cleanText(text string) string {
 	text = stripHTMLTags(text)
-	// Заменяем множественные пробелы и переносы строк
 	re := regexp.MustCompile(`\s+`)
 	return strings.TrimSpace(re.ReplaceAllString(text, " "))
+}
+
+func limitText(text string, maxLen int) string {
+	if len(text) <= maxLen {
+		return text
+	}
+	return text[:maxLen] + "..."
 }
 
 func translateWithYandex(ctx context.Context, text string) (string, error) {
@@ -141,57 +145,49 @@ func translateWithYandex(ctx context.Context, text string) (string, error) {
 		return "", errors.New("Yandex API keys not set")
 	}
 
-	var translations []string
-	for i := 0; i < len(text); i += YandexMaxTextSize {
-		end := i + YandexMaxTextSize
-		if end > len(text) {
-			end = len(text)
-		}
-		chunk := text[i:end]
+	// Ограничиваем текст перед отправкой на перевод
+	text = limitText(text, MaxSummaryLength)
 
-		payload := map[string]interface{}{
-			"folder_id":           YandexFolderID,
-			"texts":              []string{chunk},
-			"targetLanguageCode": "ru",
-		}
-
-		jsonData, err := json.Marshal(payload)
-		if err != nil {
-			return "", fmt.Errorf("serialization error: %w", err)
-		}
-
-		req, err := http.NewRequestWithContext(ctx, "POST", YandexTranslate, bytes.NewBuffer(jsonData))
-		if err != nil {
-			return "", fmt.Errorf("request creation error: %w", err)
-		}
-
-		req.Header.Set("Authorization", "Api-Key "+YandexAPIKey)
-		req.Header.Set("Content-Type", "application/json")
-
-		resp, err := httpClient.Do(req)
-		if err != nil {
-			return "", fmt.Errorf("request error: %w", err)
-		}
-		defer resp.Body.Close()
-
-		if resp.StatusCode != http.StatusOK {
-			body, _ := io.ReadAll(resp.Body)
-			return "", fmt.Errorf("status %d: %s", resp.StatusCode, body)
-		}
-
-		var result YandexTranslationResponse
-		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-			return "", fmt.Errorf("JSON decode error: %w", err)
-		}
-
-		if len(result.Translations) == 0 {
-			return "", errors.New("empty API response")
-		}
-
-		translations = append(translations, result.Translations[0].Text)
+	payload := map[string]interface{}{
+		"folder_id":           YandexFolderID,
+		"texts":              []string{text},
+		"targetLanguageCode": "ru",
 	}
 
-	return strings.Join(translations, ""), nil
+	jsonData, err := json.Marshal(payload)
+	if err != nil {
+		return "", fmt.Errorf("serialization error: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", YandexTranslate, bytes.NewBuffer(jsonData))
+	if err != nil {
+		return "", fmt.Errorf("request creation error: %w", err)
+	}
+
+	req.Header.Set("Authorization", "Api-Key "+YandexAPIKey)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("request error: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("status %d: %s", resp.StatusCode, body)
+	}
+
+	var result YandexTranslationResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", fmt.Errorf("JSON decode error: %w", err)
+	}
+
+	if len(result.Translations) == 0 {
+		return "", errors.New("empty API response")
+	}
+
+	return result.Translations[0].Text, nil
 }
 
 func isValidURL(rawURL string) bool {
@@ -221,7 +217,6 @@ func sendToTelegram(ctx context.Context, text string) error {
 	logger := ctx.Value("logger").(*slog.Logger)
 	apiURL := fmt.Sprintf(TelegramBotAPI, TelegramToken)
 
-	// Разбиваем сообщение с запасом
 	parts := splitMessage(text, TelegramMaxText-100)
 	for i, part := range parts {
 		payload := map[string]string{
@@ -356,6 +351,9 @@ func processNewArticles(ctx context.Context, logger *slog.Logger) error {
 			content = cleanText(item.Title)
 		}
 
+		// Ограничиваем текст перед переводом
+		content = limitText(content, MaxSummaryLength)
+		
 		translation, err := translateWithYandex(ctx, content)
 		if err != nil {
 			logger.Error("Translation error", "err", err, "url", item.Link)
