@@ -6,6 +6,7 @@ import (
 	"crypto/md5"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/xml"
 	"errors"
 	"fmt"
 	"io"
@@ -15,43 +16,44 @@ import (
 	"regexp"
 	"strings"
 	"time"
-	"encoding/xml"
-   	 "io"
 
 	"github.com/joho/godotenv"
 )
 
+// RSS структуры
 type RSS struct {
-    Channel struct {
-        Items []struct {
-            Title string `xml:"title"`
-            Link  string `xml:"link"`
-        } `xml:"item"`
-    } `xml:"channel"`
+	Channel struct {
+		Items []struct {
+			Title       string `xml:"title"`
+			Link        string `xml:"link"`
+			Description string `xml:"description"`
+			PubDate     string `xml:"pubDate"`
+		} `xml:"item"`
+	} `xml:"channel"`
 }
 
 // Конфигурация
 const (
-	ZeroHedgeURL       = "https://www.zerohedge.com/"
-	LastPostFile       = "last_post.txt"
-	TelegramBotAPI     = "https://api.telegram.org/bot%s/sendMessage"
-	YandexTranslate    = "https://translate.api.cloud.yandex.net/translate/v2/translate"
-	MaxRetries         = 3
-	RetryDelay         = 5 * time.Second
-	LogFile            = "zerohedge.log"
-	CheckInterval      = 1 * time.Minute // Интервал проверки
-	MaxSummaryLength   = 4000             // Максимальная длина для Telegram
-	SummarySentences   = 5                // Количество предложений для сокращения
+	RSSURL            = "https://cms.zerohedge.com/fullrss2.xml"
+	LastPostFile      = "last_post.txt"
+	TelegramBotAPI    = "https://api.telegram.org/bot%s/sendMessage"
+	YandexTranslate   = "https://translate.api.cloud.yandex.net/translate/v2/translate"
+	MaxRetries        = 3
+	RetryDelay        = 5 * time.Second
+	LogFile           = "zerohedge.log"
+	CheckInterval     = 1 * time.Minute
+	MaxSummaryLength  = 4000
+	SummarySentences  = 5
+	MaxArticlesToSend = 3 // Сколько новых статей отправлять за раз
 )
 
 var (
-	TelegramToken   string
-	TelegramChatID  string
-	YandexAPIKey    string
-	YandexFolderID  string
+	TelegramToken  string
+	TelegramChatID string
+	YandexAPIKey   string
+	YandexFolderID string
 )
 
-// Структуры данных
 type LastPost struct {
 	URL  string `json:"url"`
 	Hash string `json:"hash"`
@@ -63,51 +65,58 @@ type YandexTranslationResponse struct {
 	} `json:"translations"`
 }
 
-// Инициализация логгера
 func setupLogger() (*slog.Logger, error) {
-    logFile, err := os.OpenFile(LogFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-    if err != nil {
-        return nil, fmt.Errorf("не удалось открыть лог-файл: %w", err)
-    }
+	logFile, err := os.OpenFile(LogFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open log file: %w", err)
+	}
 
-    handler := slog.NewJSONHandler(
-        io.MultiWriter(os.Stdout, logFile),
-        &slog.HandlerOptions{
-            Level:     slog.LevelDebug,
-            AddSource: true,
-        },
-    )
-    
-    logger := slog.New(handler)
-    slog.SetDefault(logger)
-    return logger, nil
+	handler := slog.NewJSONHandler(
+		io.MultiWriter(os.Stdout, logFile),
+		&slog.HandlerOptions{
+			Level:     slog.LevelDebug,
+			AddSource: true,
+		},
+	)
+
+	logger := slog.New(handler)
+	slog.SetDefault(logger)
+	return logger, nil
 }
 
-// HTTP-клиент с логированием
 var httpClient = &http.Client{
 	Timeout: 30 * time.Second,
-	Transport: loggingRoundTripper{
-		proxied: http.DefaultTransport,
-	},
 }
 
-type loggingRoundTripper struct {
-	proxied http.RoundTripper
-}
-
-func (lrt loggingRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
-	slog.Debug("HTTP запрос", "method", req.Method, "url", req.URL.Redacted())
-	resp, err := lrt.proxied.RoundTrip(req)
+func fetchRSSFeed(ctx context.Context) (*RSS, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET", RSSURL, nil)
 	if err != nil {
-		slog.Error("HTTP ошибка", "err", err)
+		return nil, fmt.Errorf("error creating request: %w", err)
 	}
-	return resp, err
+
+	req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; ZeroHedgeMonitor/1.0)")
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("error fetching RSS: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("RSS feed returned status: %d", resp.StatusCode)
+	}
+
+	var rss RSS
+	if err := xml.NewDecoder(resp.Body).Decode(&rss); err != nil {
+		return nil, fmt.Errorf("error decoding RSS: %w", err)
+	}
+
+	return &rss, nil
 }
 
-// Основные функции
 func translateWithYandex(ctx context.Context, text string) (string, error) {
 	if YandexAPIKey == "" || YandexFolderID == "" {
-		return "", errors.New("не заданы Yandex API ключи")
+		return "", errors.New("Yandex API keys not set")
 	}
 
 	payload := map[string]interface{}{
@@ -118,12 +127,12 @@ func translateWithYandex(ctx context.Context, text string) (string, error) {
 
 	jsonData, err := json.Marshal(payload)
 	if err != nil {
-		return "", fmt.Errorf("ошибка сериализации: %w", err)
+		return "", fmt.Errorf("serialization error: %w", err)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, "POST", YandexTranslate, bytes.NewBuffer(jsonData))
 	if err != nil {
-		return "", fmt.Errorf("ошибка создания запроса: %w", err)
+		return "", fmt.Errorf("request creation error: %w", err)
 	}
 
 	req.Header.Set("Authorization", "Api-Key "+YandexAPIKey)
@@ -131,119 +140,30 @@ func translateWithYandex(ctx context.Context, text string) (string, error) {
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("ошибка запроса: %w", err)
+		return "", fmt.Errorf("request error: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("статус %d: %s", resp.StatusCode, body)
+		return "", fmt.Errorf("status %d: %s", resp.StatusCode, body)
 	}
 
 	var result YandexTranslationResponse
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return "", fmt.Errorf("ошибка разбора JSON: %w", err)
+		return "", fmt.Errorf("JSON decode error: %w", err)
 	}
 
 	if len(result.Translations) == 0 {
-		return "", errors.New("пустой ответ от API")
+		return "", errors.New("empty API response")
 	}
 
 	return result.Translations[0].Text, nil
 }
 
-func getLatestArticleFromRSS(ctx context.Context) (string, string, error) {
-    ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
-    defer cancel()
-
-    resp, err := httpClient.Get("https://cms.zerohedge.com/fullrss2.xml")
-    if err != nil {
-        return "", "", fmt.Errorf("ошибка запроса RSS: %w", err)
-    }
-    defer resp.Body.Close()
-
-    if resp.StatusCode != http.StatusOK {
-        return "", "", fmt.Errorf("неверный статус RSS: %d", resp.StatusCode)
-    }
-
-    data, err := io.ReadAll(resp.Body)
-    if err != nil {
-        return "", "", fmt.Errorf("ошибка чтения RSS: %w", err)
-    }
-
-    var rss RSS
-    if err := xml.Unmarshal(data, &rss); err != nil {
-        return "", "", fmt.Errorf("ошибка парсинга RSS: %w", err)
-    }
-
-    if len(rss.Channel.Items) == 0 {
-        return "", "", errors.New("в RSS нет статей")
-    }
-
-    // Берем самую свежую статью (первую в списке)
-    latest := rss.Channel.Items[0]
-    return latest.Link, latest.Title, nil
-}
-
-func getArticleContent(ctx context.Context, url string) (string, []string, error) {
-    resp, err := httpClient.Get(url)
-    if err != nil {
-        return "", nil, fmt.Errorf("ошибка запроса: %w", err)
-    }
-    defer resp.Body.Close()
-
-    doc, err := goquery.NewDocumentFromReader(resp.Body)
-    if err != nil {
-        return "", nil, fmt.Errorf("ошибка парсинга: %w", err)
-    }
-
-    // Улучшенный селектор для контента
-    content := doc.Find(".article-content, .content .field--name-body, .body-content").Text()
-    if content == "" {
-        return "", nil, errors.New("контент не найден")
-    }
-
-    // Извлекаем изображения
-    var images []string
-    doc.Find(".article-content img, .content img, .field--name-body img").Each(func(i int, s *goquery.Selection) {
-        if src, exists := s.Attr("src"); exists {
-            if !strings.HasPrefix(src, "http") {
-                src = ZeroHedgeURL + strings.TrimPrefix(src, "/")
-            }
-            images = append(images, src)
-        }
-    })
-
-    return strings.TrimSpace(content), images, nil
-}
-
-func sendToTelegram(ctx context.Context, text string, images []string) error {
+func sendToTelegram(ctx context.Context, text string) error {
 	apiURL := fmt.Sprintf(TelegramBotAPI, TelegramToken)
-	
-	// Сначала отправляем изображения (если есть)
-	for _, img := range images {
-		photoURL := fmt.Sprintf("https://api.telegram.org/bot%s/sendPhoto", TelegramToken)
-		payload := map[string]string{
-			"chat_id": TelegramChatID,
-			"photo":   img,
-			"caption": "",
-		}
 
-		jsonData, err := json.Marshal(payload)
-		if err != nil {
-			slog.Error("Ошибка сериализации изображения", "err", err)
-			continue
-		}
-
-		resp, err := httpClient.Post(photoURL, "application/json", bytes.NewReader(jsonData))
-		if err != nil {
-			slog.Error("Ошибка отправки изображения", "err", err, "url", img)
-			continue
-		}
-		resp.Body.Close()
-	}
-
-	// Затем отправляем текст
 	payload := map[string]string{
 		"chat_id":    TelegramChatID,
 		"text":       text,
@@ -252,84 +172,38 @@ func sendToTelegram(ctx context.Context, text string, images []string) error {
 
 	jsonData, err := json.Marshal(payload)
 	if err != nil {
-		return fmt.Errorf("ошибка сериализации: %w", err)
+		return fmt.Errorf("serialization error: %w", err)
 	}
 
 	resp, err := httpClient.Post(apiURL, "application/json", bytes.NewReader(jsonData))
 	if err != nil {
-		return fmt.Errorf("ошибка запроса: %w", err)
+		return fmt.Errorf("request error: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("статус %d", resp.StatusCode)
+		return fmt.Errorf("status %d", resp.StatusCode)
 	}
 
 	return nil
 }
 
-func processArticle(ctx context.Context, articleURL, articleTitle string) error {
-	logger := ctx.Value("logger").(*slog.Logger)
-
-	// Получаем текст статьи и изображения
-	content, images, err := getArticleContent(ctx, articleURL)
-	if err != nil {
-		return fmt.Errorf("ошибка получения контента: %w", err)
+func intelligentSummary(text string, maxLen int) string {
+	if len(text) <= maxLen {
+		return text
 	}
 
-	// Переводим через Yandex
-	translation, err := translateWithYandex(ctx, content)
-	if err != nil {
-		return fmt.Errorf("ошибка перевода: %w", err)
-	}
-
-	// Интеллектуальное сокращение текста
-	summary := intelligentSummary(translation, SummarySentences, MaxSummaryLength)
-	
-	// Формируем сообщение
-	message := fmt.Sprintf(
-		"<b>📌 %s</b>\n\n%s\n\n<a href=\"%s\">🔗 Читать полностью</a>",
-		articleTitle,
-		summary,
-		articleURL,
-	)
-
-	// Отправляем в Telegram
-	if err := sendToTelegram(ctx, message, images); err != nil {
-		return fmt.Errorf("ошибка отправки: %w", err)
-	}
-
-	logger.Info("Статья успешно обработана", "url", articleURL)
-	return nil
-}
-
-// Вспомогательные функции
-func intelligentSummary(text string, sentences int, maxLen int) string {
-	// Сначала сокращаем до максимальной длины
-	if len(text) > maxLen {
-		text = text[:maxLen]
-	}
-
-	// Затем пытаемся обрезать по последнему предложению
 	r := regexp.MustCompile(`(?s)(.*?[.!?](\s|$))`)
 	matches := r.FindAllString(text, -1)
 
 	if len(matches) > 0 {
-		if sentences > len(matches) {
-			sentences = len(matches)
+		if SummarySentences > len(matches) {
+			SummarySentences = len(matches)
 		}
-		summary := strings.Join(matches[:sentences], " ")
+		summary := strings.Join(matches[:SummarySentences], " ")
 		return strings.TrimSpace(summary) + "…"
 	}
 
-	// Если не нашли предложения, просто обрезаем
-	return shortenText(text, maxLen)
-}
-
-func shortenText(text string, maxLen int) string {
-	if len(text) <= maxLen {
-		return text
-	}
 	return text[:maxLen] + "…"
 }
 
@@ -341,11 +215,11 @@ func readLastPost() (LastPost, error) {
 		if os.IsNotExist(err) {
 			return lastPost, nil
 		}
-		return lastPost, fmt.Errorf("ошибка чтения: %w", err)
+		return lastPost, fmt.Errorf("read error: %w", err)
 	}
 
 	if err := json.Unmarshal(data, &lastPost); err != nil {
-		return lastPost, fmt.Errorf("ошибка разбора JSON: %w", err)
+		return lastPost, fmt.Errorf("JSON decode error: %w", err)
 	}
 
 	return lastPost, nil
@@ -364,84 +238,110 @@ func saveLastPost(url string) error {
 	return os.WriteFile(LastPostFile, data, 0644)
 }
 
-// Главная функция
+func processNewArticles(ctx context.Context, logger *slog.Logger) error {
+	rss, err := fetchRSSFeed(ctx)
+	if err != nil {
+		return fmt.Errorf("error fetching RSS: %w", err)
+	}
+
+	if len(rss.Channel.Items) == 0 {
+		return errors.New("no articles in RSS feed")
+	}
+
+	lastPost, err := readLastPost()
+	if err != nil {
+		return fmt.Errorf("error reading last post: %w", err)
+	}
+
+	newArticles := 0
+	for i, item := range rss.Channel.Items {
+		if newArticles >= MaxArticlesToSend {
+			break
+		}
+
+		currentHash := md5.Sum([]byte(item.Link))
+		if hex.EncodeToString(currentHash[:]) == lastPost.Hash {
+			logger.Debug("Found already processed article", "url", item.Link)
+			if i == 0 {
+				logger.Info("No new articles found")
+			}
+			break
+		}
+
+		// Для первой статьи обновляем last_post.txt
+		if i == 0 {
+			if err := saveLastPost(item.Link); err != nil {
+				return fmt.Errorf("error saving last post: %w", err)
+			}
+		}
+
+		// Используем описание из RSS вместо контента статьи
+		content := item.Description
+		if content == "" {
+			content = item.Title + ". Read more at the link below."
+		}
+
+		translation, err := translateWithYandex(ctx, content)
+		if err != nil {
+			logger.Error("Translation error", "err", err, "url", item.Link)
+			continue
+		}
+
+		summary := intelligentSummary(translation, MaxSummaryLength)
+		message := fmt.Sprintf(
+			"<b>📌 %s</b>\n\n%s\n\n<b>📅 %s</b>\n🔗 <a href=\"%s\">Read full article</a>",
+			item.Title,
+			summary,
+			item.PubDate,
+			item.Link,
+		)
+
+		if err := sendToTelegram(ctx, message); err != nil {
+			logger.Error("Error sending to Telegram", "err", err)
+			continue
+		}
+
+		logger.Info("Article processed", "title", item.Title, "url", item.Link)
+		newArticles++
+	}
+
+	return nil
+}
+
 func run(ctx context.Context) error {
-	logger := ctx.Value("logger").(*slog.Logger)
-	logger.Info("Запуск мониторинга ZeroHedge")
+	logger := slog.FromContext(ctx)
+	logger.Info("Starting ZeroHedge RSS monitor")
 
 	ticker := time.NewTicker(CheckInterval)
 	defer ticker.Stop()
-
-	logger.Info("RUN: Таймер создан", "interval", CheckInterval) 
 
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
 		case <-ticker.C:
-			// Получаем последнюю статью
-			articleURL, articleTitle, err := getLatestArticle(ctx)
-			if err != nil {
-				logger.Error("Ошибка поиска статьи", "err", err)
-				continue
-			}
-
-			// Проверяем, была ли статья уже обработана
-			lastPost, err := readLastPost()
-			if err != nil {
-				logger.Error("Ошибка чтения истории", "err", err)
-				continue
-			}
-
-			currentHash := md5.Sum([]byte(articleURL))
-			if hex.EncodeToString(currentHash[:]) == lastPost.Hash {
-				logger.Info("Новых статей нет")
-				continue
-			}
-
-			// Обрабатываем новую статью
-			if err := processArticle(ctx, articleURL, articleTitle); err != nil {
-				logger.Error("Ошибка обработки статьи", "err", err, "url", articleURL)
-				continue
-			}
-
-			// Сохраняем состояние
-			if err := saveLastPost(articleURL); err != nil {
-				logger.Error("Ошибка сохранения", "err", err)
-				continue
+			if err := processNewArticles(ctx, logger); err != nil {
+				logger.Error("Error processing articles", "err", err)
 			}
 		}
 	}
 }
 
 func main() {
-	slog.Info("MAIN: Начало выполнения")
-	slog.Info("Параметры окружения",
-            "CheckInterval", CheckInterval,
-            "ZeroHedgeURL", ZeroHedgeURL,
-            "TelegramToken", TelegramToken != "",
-            "YandexAPIKey", YandexAPIKey != "")
-	// Загрузка .env файла
-	if err := godotenv.Load(); err != nil {
-		fmt.Println("Не удалось загрузить .env файл:", err)
+	logger, err := setupLogger()
+	if err != nil {
+		panic(fmt.Sprintf("Failed to setup logger: %v", err))
 	}
 
-	// Инициализация переменных окружения
+	if err := godotenv.Load(); err != nil {
+		logger.Warn("No .env file found or error loading", "err", err)
+	}
+
 	TelegramToken = os.Getenv("TG_TOKEN")
 	TelegramChatID = os.Getenv("TG_CHAT_ID")
 	YandexAPIKey = os.Getenv("YANDEX_TRANSLATE_KEY")
 	YandexFolderID = os.Getenv("YANDEX_FOLDER_ID")
 
-	// Инициализация логгера
-	logger, err := setupLogger()
-	if err != nil {
-		panic(fmt.Sprintf("Ошибка инициализации логгера: %v", err))
-	}
-
-        // Создаем контекст с логгером
-        ctx := context.WithValue(context.Background(), "logger", logger)
-
-	// Проверка переменных окружения
 	requiredVars := []struct {
 		name  string
 		value string
@@ -454,17 +354,19 @@ func main() {
 
 	for _, v := range requiredVars {
 		if v.value == "" {
-			logger.Error("Не задана обязательная переменная окружения", "var", v.name)
+			logger.Error("Required environment variable not set", "var", v.name)
 			os.Exit(1)
 		}
 	}
 
-	// Запуск
+	ctx := context.Background()
+	ctx = context.WithValue(ctx, "logger", logger)
+
 	if err := run(ctx); err != nil {
-		logger.Error("Критическая ошибка", "err", err)
-		errorMsg := fmt.Sprintf("🚨 Ошибка в ZeroHedge Monitor:\n\n%s", err)
-		if err := sendToTelegram(ctx, errorMsg, nil); err != nil {
-			logger.Error("Не удалось отправить ошибку в Telegram", "err", err)
+		logger.Error("Critical error", "err", err)
+		errorMsg := fmt.Sprintf("🚨 ZeroHedge Monitor error:\n\n%s", err)
+		if err := sendToTelegram(ctx, errorMsg); err != nil {
+			logger.Error("Failed to send error to Telegram", "err", err)
 		}
 		os.Exit(1)
 	}
