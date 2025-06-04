@@ -177,36 +177,36 @@ func getLatestArticle(ctx context.Context) (string, string, error) {
         return "", "", errors.New("ссылка не найдена")
     }
 
-func getArticleContent(ctx context.Context, url []string, error) {
-	resp, err := httpClient.Get(url)
-	if err != nil {
-		return "", nil, fmt.Errorf("ошибка запроса: %w", err)
-	}
-	defer resp.Body.Close()
+func getArticleContent(ctx context.Context, url string) (string, []string, error) {
+    resp, err := httpClient.Get(url)
+    if err != nil {
+        return "", nil, fmt.Errorf("ошибка запроса: %w", err)
+    }
+    defer resp.Body.Close()
 
-	doc, err := goquery.NewDocumentFromReader(resp.Body)
-	if err != nil {
-		return "", nil, fmt.Errorf("ошибка парсинга: %w", err)
-	}
+    doc, err := goquery.NewDocumentFromReader(resp.Body)
+    if err != nil {
+        return "", nil, fmt.Errorf("ошибка парсинга: %w", err)
+    }
 
-	// Улучшенный селектор для контента
-	content := doc.Find(".article-content, .content .field--name-body, .body-content").Text()
-	if content == "" {
-		return "", nil, errors.New("контент не найден")
-	}
+    // Улучшенный селектор для контента
+    content := doc.Find(".article-content, .content .field--name-body, .body-content").Text()
+    if content == "" {
+        return "", nil, errors.New("контент не найден")
+    }
 
-	// Извлекаем изображения
-	var images []string
-	doc.Find(".article-content img, .content img, .field--name-body img").Each(func(i int, s *goquery.Selection) {
-		if src, exists := s.Attr("src"); exists {
-			if !strings.HasPrefix(src, "http") {
-				src = ZeroHedgeURL + strings.TrimPrefix(src, "/")
-			}
-			images = append(images, src)
-		}
-	})
+    // Извлекаем изображения
+    var images []string
+    doc.Find(".article-content img, .content img, .field--name-body img").Each(func(i int, s *goquery.Selection) {
+        if src, exists := s.Attr("src"); exists {
+            if !strings.HasPrefix(src, "http") {
+                src = ZeroHedgeURL + strings.TrimPrefix(src, "/")
+            }
+            images = append(images, src)
+        }
+    })
 
-	return strings.TrimSpace(content), images, nil
+    return strings.TrimSpace(content), images, nil
 }
 
 func sendToTelegram(ctx context.Context, text string, images []string) error {
