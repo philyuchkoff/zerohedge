@@ -157,24 +157,19 @@ func getLatestArticle(ctx context.Context) (string, string, error) {
 	}
 
 	// Улучшенный селектор для статьи
-	article := doc.Find(".content article, article.node--type-article").First()
-	if article == nil {
-		return "", "", errors.New("статья не найдена")
-	}
+	    article := doc.Find("article.teaser, div.teaser, div.node--type-article").First()
+    if article == nil {
+        return "", "", errors.New("статья не найдена (новые селекторы тоже не сработали)")
+    }
 
-	link, exists := article.Find("a[href]:has(h2, h3, h4)").First().Attr("href")
-	if !exists {
-		return "", "", errors.New("ссылка не найдена")
-	}
-
-	title := article.Find("h2, h3, h4").First().Text()
-
-	if !strings.HasPrefix(link, "http") {
-		link = ZeroHedgeURL + strings.TrimPrefix(link, "/")
-	}
-
-	return link, strings.TrimSpace(title), nil
-}
+    // Ищем ссылку и заголовок более гибко:
+    link, exists := article.Find("a[href]").First().Attr("href")
+    if !exists {
+        // Логируем HTML для отладки
+        html, _ := article.Html()
+        slog.Error("Не найдена ссылка в статье", "article_html", html)
+        return "", "", errors.New("ссылка не найдена")
+    }
 
 func getArticleContent(ctx context.Context, url string) (string, []string, error) {
 	resp, err := httpClient.Get(url)
