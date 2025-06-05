@@ -327,79 +327,111 @@ func saveLastPost(url string) error {
 }
 
 func processNewArticles(ctx context.Context, logger *slog.Logger) error {
-	rss, err := fetchRSSFeed(ctx)
-	if err != nil {
-		return fmt.Errorf("error fetching RSS: %w", err)
-	}
+    rss, err := fetchRSSFeed(ctx)
+    if err != nil {
+        return fmt.Errorf("error fetching RSS: %w", err)
+    }
 
-	if len(rss.Channel.Items) == 0 {
-		return errors.New("no articles in RSS feed")
-	}
+    if len(rss.Channel.Items) == 0 {
+        logger.Warn("No articles found in RSS feed")
+        return nil
+    }
 
-	lastPost, err := readLastPost()
-	if err != nil {
-		return fmt.Errorf("error reading last post: %w", err)
-	}
+    lastPost, err := readLastPost()
+    if err != nil {
+        return fmt.Errorf("error reading last post: %w", err)
+    }
 
-	newArticles := 0
-	for i, item := range rss.Channel.Items {
-		if newArticles >= MaxArticlesToSend {
-			break
-		}
+    newArticles := 0
+    for i, item := range rss.Channel.Items {
+        if newArticles >= MaxArticlesToSend {
+            logger.Debug("Reached maximum articles to send", "max", MaxArticlesToSend)
+            break
+        }
 
-		currentHash := md5.Sum([]byte(item.Link))
-		if hex.EncodeToString(currentHash[:]) == lastPost.Hash {
-			logger.Debug("Found already processed article", "url", item.Link)
-			if i == 0 {
-				logger.Info("No new articles found")
-			}
-			break
-		}
+        currentHash := md5.Sum([]byte(item.Link))
+        currentHashStr := hex.EncodeToString(currentHash[:])
+        
+        logger.Debug("Processing article",
+            "index", i,
+            "url", item.Link,
+            "current_hash", currentHashStr,
+            "last_hash", lastPost.Hash)
 
-		if i == 0 {
-			if err := saveLastPost(item.Link); err != nil {
-				return fmt.Errorf("error saving last post: %w", err)
-			}
-		}
+        if currentHashStr == lastPost.Hash {
+            logger.Debug("Found already processed article", "url", item.Link)
+            if i == 0 {
+                logger.Info("No new articles found")
+            }
+            break
+        }
 
-		if !isValidURL(item.Link) {
-			logger.Error("Invalid URL in article", "url", item.Link)
-			continue
-		}
+        if i == 0 {
+            if err := saveLastPost(item.Link); err != nil {
+                logger.Error("Failed to save last post", "err", err, "url", item.Link)
+                return fmt.Errorf("error saving last post: %w", err)
+            }
+        }
 
-		content := cleanText(item.Description)
-		if content == "" {
-			content = cleanText(item.Title)
-		}
+        if !isValidURL(item.Link) {
+            logger.Error("Invalid URL in article", "url", item.Link)
+            continue
+        }
 
-		// Ограничиваем текст перед переводом
-		content = limitText(content, MaxSummaryLength)
-		
-		translation, err := translateWithYandex(ctx, content)
-		if err != nil {
-			logger.Error("Translation error", "err", err, "url", item.Link)
-			continue
-		}
+        content := cleanText(item.Description)
+        if content == "" {
+            content = cleanText(item.Title)
+            logger.Debug("Using title as content as description is empty", "title", item.Title)
+        }
 
-		summary := intelligentSummary(translation)
-		message := fmt.Sprintf(
-			"<b>📌 %s</b>\n\n%s\n\n<b>📅 %s</b>\n🔗 <a href=\"%s\">Read full article</a>",
-			cleanText(item.Title),
-			summary,
-			cleanText(item.PubDate),
-			item.Link,
-		)
+        // Добавляем проверку на пустой контент
+        if content == "" {
+            logger.Error("Empty content for article", "url", item.Link)
+            continue
+        }
 
-		if err := sendToTelegram(ctx, message); err != nil {
-			logger.Error("Error sending to Telegram", "err", err)
-			continue
-		}
+        logger.Debug("Content prepared for translation",
+            "length", len(content),
+            "sample", limitText(content, 100))
 
-		logger.Info("Article processed", "title", item.Title, "url", item.Link)
-		newArticles++
-	}
+        // Добавляем задержку между запросами к API
+        time.Sleep(1 * time.Second)
 
-	return nil
+        translation, err := translateWithYandex(ctx, content)
+        if err != nil {
+            logger.Error("Translation error",
+                "err", err,
+                "url", item.Link,
+                "content_length", len(content),
+                "content_sample", limitText(content, 200))
+            continue
+        }
+
+        summary := intelligentSummary(translation)
+        message := fmt.Sprintf(
+            "<b>📌 %s</b>\n\n%s\n\n<b>📅 %s</b>\n🔗 <a href=\"%s\">Read full article</a>",
+            cleanText(item.Title),
+            summary,
+            cleanText(item.PubDate),
+            item.Link,
+        )
+
+        if err := sendToTelegram(ctx, message); err != nil {
+            logger.Error("Error sending to Telegram",
+                "err", err,
+                "url", item.Link,
+                "message_length", len(message))
+            continue
+        }
+
+        logger.Info("Article processed successfully",
+            "title", item.Title,
+            "url", item.Link,
+            "translation_length", len(translation))
+        newArticles++
+    }
+
+    return nil
 }
 
 func run(ctx context.Context, logger *slog.Logger) error {
