@@ -141,53 +141,70 @@ func limitText(text string, maxLen int) string {
 }
 
 func translateWithYandex(ctx context.Context, text string) (string, error) {
-	if YandexAPIKey == "" || YandexFolderID == "" {
-		return "", errors.New("Yandex API keys not set")
-	}
+    logger := ctx.Value("logger").(*slog.Logger)
+    
+    if YandexAPIKey == "" || YandexFolderID == "" {
+        return "", errors.New("Yandex API keys not set")
+    }
 
-	// Ограничиваем текст перед отправкой на перевод
-	text = limitText(text, MaxSummaryLength)
+    // Ограничиваем текст перед отправкой на перевод
+    text = limitText(text, MaxSummaryLength)
 
-	payload := map[string]interface{}{
-		"folder_id":           YandexFolderID,
-		"texts":              []string{text},
-		"targetLanguageCode": "ru",
-	}
+    payload := map[string]interface{}{
+        "folder_id":           YandexFolderID,
+        "texts":              []string{text},
+        "targetLanguageCode": "ru",
+    }
 
-	jsonData, err := json.Marshal(payload)
-	if err != nil {
-		return "", fmt.Errorf("serialization error: %w", err)
-	}
+    jsonData, err := json.Marshal(payload)
+    if err != nil {
+        return "", fmt.Errorf("serialization error: %w", err)
+    }
 
-	req, err := http.NewRequestWithContext(ctx, "POST", YandexTranslate, bytes.NewBuffer(jsonData))
-	if err != nil {
-		return "", fmt.Errorf("request creation error: %w", err)
-	}
+    req, err := http.NewRequestWithContext(ctx, "POST", YandexTranslate, bytes.NewBuffer(jsonData))
+    if err != nil {
+        return "", fmt.Errorf("request creation error: %w", err)
+    }
 
-	req.Header.Set("Authorization", "Api-Key "+YandexAPIKey)
-	req.Header.Set("Content-Type", "application/json")
+    req.Header.Set("Authorization", "Api-Key "+YandexAPIKey)
+    req.Header.Set("Content-Type", "application/json")
 
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("request error: %w", err)
-	}
-	defer resp.Body.Close()
+    resp, err := httpClient.Do(req)
+    if err != nil {
+        return "", fmt.Errorf("request error: %w", err)
+    }
+    defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("status %d: %s", resp.StatusCode, body)
-	}
+    // Читаем тело ответа независимо от статуса
+    body, err := io.ReadAll(resp.Body)
+    if err != nil {
+        return "", fmt.Errorf("failed to read response body: %w", err)
+    }
 
-	var result YandexTranslationResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return "", fmt.Errorf("JSON decode error: %w", err)
-	}
+    if resp.StatusCode != http.StatusOK {
+        logger.Error("Yandex Translate API error",
+            "status", resp.StatusCode,
+            "response_body", string(body),
+            "text_length", len(text),
+            "text_sample", limitText(text, 100))
+        return "", fmt.Errorf("status %d: %s", resp.StatusCode, string(body))
+    }
 
-	if len(result.Translations) == 0 {
-		return "", errors.New("empty API response")
-	}
+    var result YandexTranslationResponse
+    if err := json.Unmarshal(body, &result); err != nil {
+        logger.Error("Failed to decode Yandex response",
+            "error", err,
+            "response_body", string(body))
+        return "", fmt.Errorf("JSON decode error: %w, body: %s", err, string(body))
+    }
 
-	return result.Translations[0].Text, nil
+    if len(result.Translations) == 0 {
+        logger.Error("Empty translation response",
+            "response_body", string(body))
+        return "", fmt.Errorf("empty API response: %s", string(body))
+    }
+
+    return result.Translations[0].Text, nil
 }
 
 func isValidURL(rawURL string) bool {
